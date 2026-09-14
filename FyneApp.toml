@@ -1,0 +1,11 @@
+Website = "https://roffe.nu/"
+
+[Details]
+Icon = "Icon.png"
+Name = "CIM Tool"
+ID = "com.roffe.cimtool"
+Version = "1.0.0"
+Build = 1
+
+[Migrations]
+fyneDo = true

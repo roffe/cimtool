@@ -1,0 +1,121 @@
+package gui
+
+import (
+	"fmt"
+	"time"
+
+	"fyne.io/fyne/v2"
+	"github.com/roffe/cim"
+	"github.com/roffe/cimtool/adapter"
+)
+
+func (m *mainWindow) newAdapter() *adapter.Client {
+	onMessage := func(msg string) {
+		m.output(msg)
+	}
+	onProgress := func(progress float64) {
+		fyne.Do(func() { m.progressBar.SetValue(progress) })
+	}
+	onError := func(err error) {
+		m.output(err.Error())
+	}
+	rd, err := m.e.readDelayValue.Get()
+	if err != nil {
+		panic(err)
+	}
+	wd, err := m.e.writeDelayValue.Get()
+	if err != nil {
+		panic(err)
+	}
+	return adapter.New(uint8(rd), uint8(wd)).OnMessage(onMessage).OnProgress(onProgress).OnError(onError)
+
+}
+
+func (m *mainWindow) writeCIM(port string, data []byte) error {
+	input, err := cim.MustLoadBytes("read.bin", data)
+	if err != nil {
+		return fmt.Errorf("Failed to load CIM: %w", err) //lint:ignore ST1005 ignore
+	}
+
+	xorBytes, err := input.XORBytes()
+	if err != nil {
+		return fmt.Errorf("Failed to XOR CIM: %w", err) //lint:ignore ST1005 ignore
+	}
+
+	client := m.newAdapter()
+	if err := client.Open(m.e.port, VERSION); err != nil {
+		return fmt.Errorf("Failed to init adapter: %w", err) //lint:ignore ST1005 ignore
+	}
+	defer client.Close()
+
+	fyne.Do(func() { m.progressBar.Max = float64(len(xorBytes)) })
+
+	if err := client.WriteCIM(xorBytes); err != nil {
+		return fmt.Errorf("Failed to write CIM: %w", err) //lint:ignore ST1005 ignore
+	}
+	return nil
+}
+
+func (m *mainWindow) readCIM() ([]byte, *cim.Bin, error) {
+	client := m.newAdapter()
+	if err := client.Open(m.e.port, VERSION); err != nil {
+		return nil, nil, fmt.Errorf("Failed to init adapter: %v", err) //lint:ignore ST1005 ignore
+	}
+	defer client.Close()
+
+	fyne.Do(func() { m.progressBar.Max = 512 })
+
+	start := time.Now()
+	m.output("Reading CIM ...")
+
+	rawBytes, err := client.ReadCIM()
+	if err != nil {
+		return rawBytes, nil, fmt.Errorf("Failed to read CIM: %w", err) //lint:ignore ST1005 ignore
+	}
+	defer m.output("Read took %s", time.Since(start).String())
+	bin, err := cim.LoadBytes("read.bin", rawBytes)
+	if err != nil {
+		return rawBytes, nil, fmt.Errorf("Failed to load CIM: %w", err) //lint:ignore ST1005 ignore
+	}
+	if err := bin.Validate(); err != nil {
+		return rawBytes, nil, fmt.Errorf("Failed to validate CIM: %w", err) //lint:ignore ST1005 ignore
+	}
+	return rawBytes, bin, nil
+}
+
+func (m mainWindow) readMIU() ([]byte, error) {
+	client := m.newAdapter()
+	if err := client.Open(m.e.port, VERSION); err != nil {
+		return nil, fmt.Errorf("Failed to init adapter: %v", err) //lint:ignore ST1005 ignore
+	}
+	defer client.Close()
+
+	fyne.Do(func() { m.progressBar.Max = 128 })
+
+	start := time.Now()
+	m.output("Reading MIU ...")
+
+	rawBytes, err := client.ReadMIU()
+	if err != nil {
+		return rawBytes, fmt.Errorf("Failed to read MIU: %w", err) //lint:ignore ST1005 ignore
+	}
+	defer m.output("Read took %s", time.Since(start).String())
+
+	return rawBytes, nil
+}
+
+func (m *mainWindow) writeMIU(port string, data []byte) error {
+	client := m.newAdapter()
+	if err := client.Open(m.e.port, VERSION); err != nil {
+		return fmt.Errorf("Failed to init adapter: %w", err) //lint:ignore ST1005 ignore
+	}
+	defer client.Close()
+
+	fyne.Do(func() { m.progressBar.Max = float64(128) })
+
+	if err := client.WriteMIU(data); err != nil {
+		return fmt.Errorf("Failed to write MIU: %w", err) //lint:ignore ST1005 ignore
+	}
+
+	return nil
+}
