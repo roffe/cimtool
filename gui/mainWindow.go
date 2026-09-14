@@ -46,8 +46,8 @@ type mainWindow struct {
 	copyButton  *widget.Button
 	clearButton *widget.Button
 
-	readMIUButton  *widget.Button
-	writeMIUButton *widget.Button
+	readMIUButton *widget.Button
+	//writeMIUButton *widget.Button
 
 	progressBar *widget.ProgressBar
 
@@ -124,21 +124,21 @@ func newMainWindow(e *Gui) *mainWindow {
 
 	message, ports, err := adapter.ListPorts()
 	if err != nil {
-		m.output(err.Error())
+		m.outputStr(err.Error())
 	}
 	if message != "" {
-		m.output(message)
+		m.outputStr(message)
 	}
 
 	m.rescanButton = widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
 		message, ports, err := adapter.ListPorts()
 		if err != nil {
-			m.output(err.Error())
+			m.outputStr(err.Error())
 			return
 		}
 		m.portList.Options = ports
 		m.portList.Refresh()
-		m.output(message)
+		m.outputStr(message)
 	})
 
 	m.portList = &widget.Select{
@@ -187,16 +187,18 @@ func newMainWindow(e *Gui) *mainWindow {
 		}
 	})
 
-	m.writeMIUButton = widget.NewButtonWithIcon("Write MIU", theme.UploadIcon(), func() {
-		b, err := os.ReadFile("128_test.bin")
-		if err != nil {
-			dialog.ShowError(err, m.Window)
-		}
+	/*
+		m.writeMIUButton = widget.NewButtonWithIcon("Write MIU", theme.UploadIcon(), func() {
+			b, err := os.ReadFile("128_test.bin")
+			if err != nil {
+				dialog.ShowError(err, m.Window)
+			}
 
-		if err := m.writeMIU(m.e.port, b); err != nil {
-			dialog.ShowError(err, m.Window)
-		}
-	})
+			if err := m.writeMIU(m.e.port, b); err != nil {
+				dialog.ShowError(err, m.Window)
+			}
+		})
+	*/
 
 	m.SetContent(m.layout())
 	m.Resize(mainSize)
@@ -288,13 +290,13 @@ func (m *mainWindow) readClickHandler() {
 	go func() {
 		defer m.enableButtons()
 		if m.e.port == "" {
-			m.output("Please select a port first")
+			m.outputStr("Please select a port first")
 			return
 		}
 		ignoreReadErrors, _ := m.e.ignoreError.Get()
 		rawBytes, bin, err := m.readCIM()
 		if err != nil {
-			m.output(err.Error())
+			m.outputStr(err.Error())
 			if err.Error() == "Timeout reading eeprom" {
 				return
 			}
@@ -334,7 +336,7 @@ func (m *mainWindow) writeClickHandler() {
 	go func() {
 		_, bin, err := loadFile()
 		if err != nil {
-			m.output(err.Error())
+			m.outputStr(err.Error())
 			return
 		}
 		if bin == nil {
@@ -347,7 +349,7 @@ func (m *mainWindow) writeClickHandler() {
 					go func() {
 						m.disableButtons()
 						defer m.enableButtons()
-						if err := m.writeCIM(m.e.port, bin); err != nil {
+						if err := m.writeCIM(bin); err != nil {
 							fyne.Do(func() {
 								dialog.ShowError(err, m)
 								m.docTab.Select(m.logTab)
@@ -386,7 +388,7 @@ func (m *mainWindow) eraseClickHandler() {
 
 				m.output("Erasing ... ")
 				if err := client.EraseCIM(); err != nil {
-					m.output(err.Error())
+					m.outputStr(err.Error())
 					return
 				}
 				m.output("Erase took %s", time.Since(start).String())
@@ -402,7 +404,7 @@ func (m *mainWindow) eraseClickHandler() {
 func (m *mainWindow) saveFile(title, suggestedFilename string, data []byte) bool {
 	filename, err := saveFileNative(title, suggestedFilename)
 	if err != nil {
-		m.output(err.Error())
+		m.outputStr(err.Error())
 		return false
 	}
 	if filename == "" {
@@ -413,7 +415,7 @@ func (m *mainWindow) saveFile(title, suggestedFilename string, data []byte) bool
 	if err := os.WriteFile(filename, data, 0644); err == nil {
 		m.output("Saved to %s", filename)
 	} else {
-		m.output(err.Error())
+		m.outputStr(err.Error())
 		return false
 	}
 	return true
@@ -438,6 +440,10 @@ func addSuffix(s, suffix string) string {
 		return s + suffix
 	}
 	return s
+}
+
+func (m *mainWindow) outputStr(text string) {
+	m.output("%s", text)
 }
 
 func (m *mainWindow) output(format string, values ...interface{}) {

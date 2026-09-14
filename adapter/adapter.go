@@ -250,7 +250,6 @@ func (c *Client) ReadMIU() ([]byte, error) {
 }
 
 func (c *Client) WriteMIU(data []byte) error {
-	return nil
 	if err := c.sendCMD(opWrite, miuType, miuSize, miuOrg, c.wdelay); err != nil {
 		return err
 	}

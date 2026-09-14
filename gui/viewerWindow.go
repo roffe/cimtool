@@ -130,7 +130,7 @@ func (vw *viewerWindow) newToolbar() fyne.CanvasObject {
 				go func() {
 					vw.e.mw.disableButtons()
 					defer vw.e.mw.enableButtons()
-					if err := vw.e.mw.writeCIM(vw.e.port, bin); err != nil {
+					if err := vw.e.mw.writeCIM(bin); err != nil {
 						fyne.Do(func() { dialog.ShowError(err, vw) })
 						return
 					}

@@ -15,17 +15,32 @@ var firmwareHex []byte
 
 // STK500v1 protocol constants (see optiboot / stk500.h)
 const (
-	stkOK       = 0x10
-	stkInsync   = 0x14
-	crcEOP      = 0x20
-	cmdGetSync  = 0x30
-	cmdEnterPM  = 0x50
-	cmdLeavePM  = 0x51
-	cmdLoadAddr = 0x55
-	cmdProgPage = 0x64
-	cmdReadSign = 0x75
+	stkOK        = 0x10
+	stkInsync    = 0x14
+	crcEOP       = 0x20
+	cmdGetSync   = 0x30
+	cmdEnterPM   = 0x50
+	cmdLeavePM   = 0x51
+	cmdChipErase = 0x52
+	cmdLoadAddr  = 0x55
+	cmdProgPage  = 0x64
+	cmdReadSign  = 0x75
 
-	pageSize = 128 // ATmega328P flash page in bytes
+	pageSize  = 128   // ATmega328P/PB flash page in bytes
+	flashSize = 32768 // ATmega328P/PB flash in bytes
+)
+
+// urprotocol (urboot bootloaders, avrdude -c urclock) constants, see avrdude urclock.c
+const (
+	urProgPageFL = 0x02
+	urReadPageFL = 0x03
+
+	ubReadFlash = 4  // bootloader can read flash
+	ubChipErase = 16 // bootloader has chip erase
+	ubNumMCU    = 2040
+
+	mcuid328P  = 119
+	mcuid328PB = 120
 )
 
 func Update(port, board string, cb func(format string, values ...interface{})) ([]byte, error) {
@@ -46,7 +61,7 @@ func Update(port, board string, cb func(format string, values ...interface{})) (
 	}
 	defer p.Close()
 	// Short per-read timeout so we can hammer GET_SYNC inside the brief
-	// (~1s) Optiboot window without overshooting it.
+	// (~1s) bootloader window without overshooting it.
 	p.SetReadTimeout(200 * time.Millisecond)
 
 	// Arduino auto-reset: the reset cap triggers on the falling edge of DTR,
@@ -70,17 +85,68 @@ func Update(port, board string, cb func(format string, values ...interface{})) (
 		return nil, err
 	}
 
+	if pr.insync == stkInsync && pr.ok == stkOK {
+		err = pr.flashOptiboot(firmware, cb)
+	} else {
+		err = pr.flashUrboot(firmware, cb)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	cb("%s", "Done")
+	return nil, nil
+}
+
+type programmer struct {
+	p serial.Port
+	// Protocol ack bytes learned during sync: 0x14/0x10 for STK500v1
+	// (optiboot), anything else encodes urboot's MCU id and features.
+	insync, ok byte
+}
+
+// sync hammers GET_SYNC until the bootloader answers with the same two ack
+// bytes twice in a row. Bootloaders only listen for ~1s after reset, so we
+// send fast with a short read timeout rather than waiting long on any single
+// attempt. The first byte (0x30) is also what urboot's autobaud locks onto.
+func (pr *programmer) sync() error {
+	deadline := time.Now().Add(5 * time.Second)
+	resp := make([]byte, 2)
+	var last [2]byte
+	seen := false
+	for time.Now().Before(deadline) {
+		pr.p.ResetInputBuffer() // drain: guards against line noise / app chatter
+		if _, err := pr.p.Write([]byte{cmdGetSync, crcEOP}); err != nil {
+			return err
+		}
+		if err := pr.readFull(resp); err != nil || resp[0] == resp[1] {
+			seen = false
+			continue // timeout/no data/garbage, try again
+		}
+		if seen && resp[0] == last[0] && resp[1] == last[1] {
+			pr.insync, pr.ok = resp[0], resp[1]
+			return nil
+		}
+		last[0], last[1] = resp[0], resp[1]
+		seen = true
+	}
+	return fmt.Errorf("could not sync with bootloader (no response) - check the board/baud and that nothing else has the port open")
+}
+
+// flashOptiboot writes firmware through a classic STK500v1 bootloader.
+func (pr *programmer) flashOptiboot(firmware []byte, cb func(string, ...interface{})) error {
 	sig, err := pr.cmd([]byte{cmdReadSign}, 3)
 	if err != nil {
-		return nil, fmt.Errorf("read signature: %w", err)
+		return fmt.Errorf("read signature: %w", err)
 	}
 	cb("Device signature: %02X %02X %02X", sig[0], sig[1], sig[2])
-	if sig[0] != 0x1E || sig[1] != 0x95 || sig[2] != 0x0F {
-		return nil, fmt.Errorf("unexpected device signature %02X%02X%02X, expected 1E950F (ATmega328P)", sig[0], sig[1], sig[2])
+	// ATmega328P = 1E 95 0F, ATmega328PB = 1E 95 16. Same flash size and page size.
+	if sig[0] != 0x1E || sig[1] != 0x95 || (sig[2] != 0x0F && sig[2] != 0x16) {
+		return fmt.Errorf("unexpected device signature %02X%02X%02X, expected 1E950F (ATmega328P) or 1E9516 (ATmega328PB)", sig[0], sig[1], sig[2])
 	}
 
 	if _, err := pr.cmd([]byte{cmdEnterPM}, 0); err != nil {
-		return nil, fmt.Errorf("enter programming mode: %w", err)
+		return fmt.Errorf("enter programming mode: %w", err)
 	}
 
 	cb("Writing %d bytes ...", len(firmware))
@@ -90,42 +156,138 @@ func Update(port, board string, cb func(format string, values ...interface{})) (
 			end = len(firmware)
 		}
 		if err := pr.writePage(addr, firmware[addr:end]); err != nil {
-			return nil, fmt.Errorf("write page at 0x%X: %w", addr, err)
+			return fmt.Errorf("write page at 0x%X: %w", addr, err)
 		}
 		cb("Wrote 0x%04X", addr)
 	}
 
 	if _, err := pr.cmd([]byte{cmdLeavePM}, 0); err != nil {
-		return nil, fmt.Errorf("leave programming mode: %w", err)
+		return fmt.Errorf("leave programming mode: %w", err)
+	}
+	return nil
+}
+
+// decodeUrbootInfo extracts MCU id and feature bits from urboot's ack bytes.
+func decodeUrbootInfo(insync, ok byte) (mcuid, features int) {
+	o := int(ok)
+	if o > int(insync) {
+		o--
+	}
+	info := int(insync)*255 + o
+	return info % ubNumMCU, info / ubNumMCU
+}
+
+// flashUrboot writes firmware through a urboot bootloader (MiniCore default)
+// using urprotocol. Flash only; no metadata is written (avrdude -x nometadata).
+func (pr *programmer) flashUrboot(firmware []byte, cb func(string, ...interface{})) error {
+	mcuid, feat := decodeUrbootInfo(pr.insync, pr.ok)
+	if mcuid != mcuid328P && mcuid != mcuid328PB {
+		return fmt.Errorf("unexpected urboot MCU id %d, expected %d (ATmega328P) or %d (ATmega328PB)", mcuid, mcuid328P, mcuid328PB)
+	}
+	if feat&ubReadFlash == 0 {
+		return fmt.Errorf("urboot bootloader cannot read flash, cannot locate it")
 	}
 
-	cb("%s", "Done")
-	return nil, nil
-}
+	// Top 6 bytes of flash: numpages, vectnum, rjmp writepage (2), cap, version.
+	const top = flashSize - 6
+	info, err := pr.cmd([]byte{urReadPageFL, byte(top & 0xFF), byte(top >> 8), 6}, 6)
+	if err != nil {
+		return fmt.Errorf("read bootloader info: %w", err)
+	}
+	numpages, vectnum, urver := int(info[0]&0x7f), int(info[1]&0x7f), info[5]
+	if urver < 0o72 || urver > 0o147 || numpages == 0 || numpages*pageSize > 2048 {
+		return fmt.Errorf("unrecognised bootloader info % X", info)
+	}
+	blstart := flashSize - numpages*pageSize
+	cb("urboot v%d.%d on MCU id %d, bootloader at 0x%04X, vector %d", urver>>3, urver&7, mcuid, blstart, vectnum)
 
-type programmer struct {
-	p serial.Port
-}
-
-// sync hammers GET_SYNC until the bootloader answers INSYNC/OK. Optiboot only
-// listens for ~1s after reset, so we send fast with a short read timeout
-// rather than waiting long on any single attempt.
-func (pr *programmer) sync() error {
-	deadline := time.Now().Add(5 * time.Second)
-	resp := make([]byte, 2)
-	for time.Now().Before(deadline) {
-		pr.p.ResetInputBuffer()
-		if _, err := pr.p.Write([]byte{cmdGetSync, crcEOP}); err != nil {
+	if len(firmware) > blstart {
+		return fmt.Errorf("firmware (%d bytes) overlaps bootloader at 0x%04X", len(firmware), blstart)
+	}
+	fw := append([]byte(nil), firmware...)
+	if vectnum > 0 {
+		if err := patchVectors(fw, blstart, vectnum); err != nil {
 			return err
 		}
-		if err := pr.readFull(resp); err != nil {
-			continue // timeout/no data, try again
+	}
+
+	if feat&ubChipErase != 0 {
+		cb("%s", "Erasing ...")
+		pr.p.SetReadTimeout(10 * time.Second)
+		_, err := pr.cmd([]byte{cmdChipErase}, 0)
+		pr.p.SetReadTimeout(200 * time.Millisecond)
+		if err != nil {
+			return fmt.Errorf("chip erase: %w", err)
 		}
-		if resp[0] == stkInsync && resp[1] == stkOK {
-			return nil
+	} else {
+		// ponytail: emulate chip erase by writing 0xFF over the whole app area
+		for len(fw) < blstart {
+			fw = append(fw, 0xFF)
 		}
 	}
-	return fmt.Errorf("could not sync with bootloader (no response) - check the board/baud and that nothing else has the port open")
+
+	cb("Writing %d bytes ...", len(fw))
+	page := make([]byte, pageSize)
+	for addr := 0; addr < len(fw); addr += pageSize {
+		for i := range page {
+			page[i] = 0xFF
+		}
+		copy(page, fw[addr:])
+		payload := append([]byte{urProgPageFL, byte(addr), byte(addr >> 8), byte(pageSize)}, page...)
+		if _, err := pr.cmd(payload, 0); err != nil {
+			return fmt.Errorf("write page at 0x%X: %w", addr, err)
+		}
+		cb("Wrote 0x%04X", addr)
+	}
+
+	if _, err := pr.cmd([]byte{cmdLeavePM}, 0); err != nil {
+		return fmt.Errorf("leave programming mode: %w", err)
+	}
+	return nil
+}
+
+// patchVectors turns fw into a vector-bootloader image: the reset vector
+// jumps to the bootloader and vector slot vectnum jumps to the application's
+// original start. Mirrors avrdude's urclock for 4-byte vectors (flash > 8K).
+func patchVectors(fw []byte, blstart, vectnum int) error {
+	const vecsz = 4
+	if len(fw) < (vectnum+1)*vecsz {
+		return fmt.Errorf("firmware too short to hold vector %d", vectnum)
+	}
+	op16 := uint16(fw[0]) | uint16(fw[1])<<8
+	var app int
+	switch {
+	case op16&0xFE0E == 0x940C: // jmp k
+		w := int(fw[2]) | int(fw[3])<<8
+		app = (w | int(op16&1)<<16 | int(op16&0x1F0)<<13) << 1
+	case op16&0xF000 == 0xC000: // rjmp k
+		d := int(int16(op16<<4)>>3) + 2 // signed word offset -> bytes, relative to next insn
+		d &= 8191
+		if d >= 4096 {
+			d -= 8192
+		}
+		if d < 0 {
+			d += flashSize
+		}
+		app = d
+	default:
+		return fmt.Errorf("reset vector %04X is not a jmp/rjmp", op16)
+	}
+	if app == blstart {
+		return nil // already points to the bootloader
+	}
+	if app < vectnum*vecsz || app >= len(fw) {
+		return fmt.Errorf("reset vector jumps to 0x%04X, outside the application", app)
+	}
+	// Reset: rjmp backwards (wrapping around flash end) to bootloader + "ur" marker.
+	r := 0xC000 | uint16((blstart-flashSize-2)/2)&0x0FFF
+	fw[0], fw[1], fw[2], fw[3] = byte(r), byte(r>>8), 0x75, 0x72
+	// Vector slot: jmp app.
+	w := app >> 1
+	j := uint16(0x940C) | uint16(w>>16&1) | uint16(w>>17&0x1F)<<4
+	i := vectnum * vecsz
+	fw[i], fw[i+1], fw[i+2], fw[i+3] = byte(j), byte(j>>8), byte(w), byte(w>>8)
+	return nil
 }
 
 func (pr *programmer) writePage(addr int, data []byte) error {
@@ -149,8 +311,8 @@ func (pr *programmer) cmd(payload []byte, respLen int) ([]byte, error) {
 	if err := pr.readFull(head); err != nil {
 		return nil, err
 	}
-	if head[0] != stkInsync {
-		return nil, fmt.Errorf("expected INSYNC, got 0x%02X", head[0])
+	if head[0] != pr.insync {
+		return nil, fmt.Errorf("expected INSYNC 0x%02X, got 0x%02X", pr.insync, head[0])
 	}
 	resp := make([]byte, respLen)
 	if respLen > 0 {
@@ -162,8 +324,8 @@ func (pr *programmer) cmd(payload []byte, respLen int) ([]byte, error) {
 	if err := pr.readFull(tail); err != nil {
 		return nil, err
 	}
-	if tail[0] != stkOK {
-		return nil, fmt.Errorf("expected OK, got 0x%02X", tail[0])
+	if tail[0] != pr.ok {
+		return nil, fmt.Errorf("expected OK 0x%02X, got 0x%02X", pr.ok, tail[0])
 	}
 	return resp, nil
 }

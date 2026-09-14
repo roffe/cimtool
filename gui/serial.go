@@ -11,13 +11,13 @@ import (
 
 func (m *mainWindow) newAdapter() *adapter.Client {
 	onMessage := func(msg string) {
-		m.output(msg)
+		m.outputStr(msg)
 	}
 	onProgress := func(progress float64) {
 		fyne.Do(func() { m.progressBar.SetValue(progress) })
 	}
 	onError := func(err error) {
-		m.output(err.Error())
+		m.outputStr(err.Error())
 	}
 	rd, err := m.e.readDelayValue.Get()
 	if err != nil {
@@ -31,7 +31,7 @@ func (m *mainWindow) newAdapter() *adapter.Client {
 
 }
 
-func (m *mainWindow) writeCIM(port string, data []byte) error {
+func (m *mainWindow) writeCIM(data []byte) error {
 	input, err := cim.MustLoadBytes("read.bin", data)
 	if err != nil {
 		return fmt.Errorf("Failed to load CIM: %w", err) //lint:ignore ST1005 ignore
@@ -72,7 +72,7 @@ func (m *mainWindow) readCIM() ([]byte, *cim.Bin, error) {
 	if err != nil {
 		return rawBytes, nil, fmt.Errorf("Failed to read CIM: %w", err) //lint:ignore ST1005 ignore
 	}
-	defer m.output("Read took %s", time.Since(start).String())
+	defer func() { m.output("Read took %s", time.Since(start).String()) }()
 	bin, err := cim.LoadBytes("read.bin", rawBytes)
 	if err != nil {
 		return rawBytes, nil, fmt.Errorf("Failed to load CIM: %w", err) //lint:ignore ST1005 ignore
@@ -99,7 +99,7 @@ func (m mainWindow) readMIU() ([]byte, error) {
 	if err != nil {
 		return rawBytes, fmt.Errorf("Failed to read MIU: %w", err) //lint:ignore ST1005 ignore
 	}
-	defer m.output("Read took %s", time.Since(start).String())
+	m.output("Read took %s", time.Since(start).String())
 
 	return rawBytes, nil
 }
